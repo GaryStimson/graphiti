@@ -1,0 +1,45 @@
+# Personal memory server for a home machine.
+#
+# Builds this fork (including the remember/recall tools) into the combined
+# FalkorDB + MCP image. Every port is bound to 127.0.0.1 only; expose the MCP
+# endpoint to the internet with Tailscale Funnel (see docs/HOME_SETUP.md).
+#
+#   cd mcp_server
+#   cp .env.home.example .env    # then fill it in
+#   docker compose -f docker/docker-compose-home.yml up -d --build
+services:
+  personal-memory:
+    image: personal-memory-mcp:local
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      args:
+        GRAPHITI_CORE_VERSION: ${GRAPHITI_CORE_VERSION:-0.30.2}
+    restart: unless-stopped
+    env_file:
+      - path: ../.env
+        required: true
+    environment:
+      - FALKORDB_PASSWORD=${FALKORDB_PASSWORD:-}
+      - BROWSER=${BROWSER:-1}
+      - SEMAPHORE_LIMIT=${SEMAPHORE_LIMIT:-5}
+    volumes:
+      # Edit categories in config/config-home.yaml and restart; no rebuild needed.
+      - ../config/config-home.yaml:/app/mcp/config/config.yaml:ro
+      - personal_memory_data:/var/lib/falkordb/data
+      - personal_memory_logs:/var/log/graphiti
+    ports:
+      - "127.0.0.1:8000:8000"  # MCP server (Tailscale Funnel target)
+      - "127.0.0.1:3000:3000"  # FalkorDB browser UI (local only; never funnel this)
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+volumes:
+  personal_memory_data:
+    name: personal_memory_data
+  personal_memory_logs:
+    name: personal_memory_logs

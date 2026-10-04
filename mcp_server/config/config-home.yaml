@@ -1,0 +1,145 @@
+# Personal memory configuration (home server, single FalkorDB + MCP container)
+#
+# One shared memory for every agent (Claude, Grok, OpenMaus, ...). Facts are tagged
+# with categories and kept in a single graph so related areas of life stay linked.
+#
+# Secrets come from the environment (.env), never from this file:
+#   MCP_SECRET_PATH     unguessable URL segment: python -c 'import secrets; print(secrets.token_urlsafe(32))'
+#   MCP_ALLOWED_HOSTS   your Tailscale Funnel hostname, e.g. homeserver.tail1234.ts.net
+#   MEMORY_OWNER_NAME   your name, so "I"/"my" from every agent maps to one entity
+#   OPENAI_API_KEY / ANTHROPIC_API_KEY
+
+server:
+  transport: "http"
+  host: "0.0.0.0"
+  port: 8000
+  secret_path: ${MCP_SECRET_PATH}
+  allowed_hosts: ${MCP_ALLOWED_HOSTS:}
+
+llm:
+  # openai works best for graphiti's structured extraction; anthropic is also supported
+  # (set LLM_PROVIDER=anthropic and MODEL_NAME=claude-haiku-4-5).
+  provider: ${LLM_PROVIDER:openai}
+  model: ${MODEL_NAME:gpt-5-mini}
+  max_tokens: 4096
+
+  providers:
+    openai:
+      api_key: ${OPENAI_API_KEY}
+      api_url: ${OPENAI_API_URL:https://api.openai.com/v1}
+      organization_id: ${OPENAI_ORGANIZATION_ID:}
+
+    anthropic:
+      api_key: ${ANTHROPIC_API_KEY}
+      api_url: ${ANTHROPIC_API_URL:https://api.anthropic.com}
+      max_retries: 3
+
+embedder:
+  provider: "openai"
+  model: ${EMBEDDER_MODEL:text-embedding-3-small}
+  dimensions: 1536
+
+  providers:
+    openai:
+      api_key: ${OPENAI_API_KEY}
+      api_url: ${OPENAI_API_URL:https://api.openai.com/v1}
+      organization_id: ${OPENAI_ORGANIZATION_ID:}
+
+database:
+  provider: "falkordb"
+
+  providers:
+    falkordb:
+      # Combined image: FalkorDB runs in the same container
+      uri: "redis://localhost:6379"
+      password: ${FALKORDB_PASSWORD:}
+      database: ${FALKORDB_DATABASE:default_db}
+
+graphiti:
+  # Every memory lives in this one group so facts across categories stay connected.
+  group_id: ${GRAPHITI_GROUP_ID:personal}
+  episode_id_prefix: ${EPISODE_ID_PREFIX:}
+  user_id: ${USER_ID:owner}
+  owner_name: ${MEMORY_OWNER_NAME:}
+
+  entity_types:
+    - name: "Preference"
+      description: "User preferences, choices, opinions, or selections (PRIORITIZE over most other types except User/Assistant)"
+    - name: "Person"
+      description: "An individual human referenced in the content"
+    - name: "Organization"
+      description: "Companies, employers, banks, lenders, clubs, institutions, or formal entities"
+    - name: "Asset"
+      description: "Things owned or held: property, accounts, savings, investments, pensions, vehicles, equipment"
+    - name: "Goal"
+      description: "Targets, plans, or intentions with a desired outcome (financial, fitness, career, personal)"
+    - name: "Event"
+      description: "Time-bound activities, occurrences, appointments, or experiences"
+    - name: "Location"
+      description: "Physical or virtual places where activities occur"
+    - name: "Document"
+      description: "Contracts, policies, statements, articles, or other information content"
+    - name: "Procedure"
+      description: "Standard operating procedures and sequential instructions"
+    - name: "Topic"
+      description: "Subject of conversation, interest, or knowledge domain (use as last resort)"
+
+  # Categories (life domains). Agents pass them to `remember`; otherwise they are inferred
+  # from keywords. `related` categories are recalled together, so asking about a mortgage
+  # also returns finance and employment facts. Edit freely: new categories take effect on
+  # restart, and agents may also use ad-hoc category names.
+  categories:
+    - name: "profile"
+      description: "Personal details: name, birthday, home town, address, contact details, identity documents"
+      keywords: ["birthday", "born", "date of birth", "address", "home town", "passport", "driving licence", "phone number", "email"]
+      related: ["family"]
+
+    - name: "family"
+      description: "Children, partner, relatives and relationships"
+      keywords: ["son", "daughter", "children", "kids", "partner", "girlfriend", "boyfriend", "wife", "husband", "mum", "dad", "parent", "brother", "sister", "relationship"]
+      related: ["profile"]
+
+    - name: "finance"
+      description: "Money: bank accounts, savings, budgets, spending, debts, credit, pensions, investments, tax, insurance"
+      keywords: ["bank", "savings", "budget", "spending", "debt", "loan", "credit card", "pension", "investment", "isa", "shares", "tax", "insurance", "bill", "subscription", "income", "net worth", "interest rate"]
+      related: ["employment", "property"]
+
+    - name: "property"
+      description: "Home and property: mortgage, rent, house purchase or sale, utilities, maintenance, renovations"
+      keywords: ["mortgage", "remortgage", "remortgaging", "house", "home", "flat", "rent", "landlord", "lender", "deposit", "stamp duty", "council tax", "energy bill", "renovation", "extension", "conveyancing", "valuation", "equity"]
+      related: ["finance", "employment"]
+
+    - name: "employment"
+      description: "Work and career: employer, role, salary, bonus, contract, colleagues, performance, side income"
+      keywords: ["job", "employer", "salary", "bonus", "payslip", "promotion", "career", "role", "contract", "colleague", "manager", "work", "office", "redundancy", "self-employed"]
+      related: ["finance"]
+
+    - name: "health_fitness"
+      description: "Health, fitness, gym, training, diet, sleep, injuries and medical matters"
+      keywords: ["gym", "fitness", "workout", "training", "weights", "diet", "nutrition", "weight", "sleep", "injury", "doctor", "gp", "dentist", "medication", "health", "heart rate", "vo2"]
+      related: ["cycling"]
+
+    - name: "cycling"
+      description: "Cycling: bikes, rides, routes, events, the cycling club and its members"
+      keywords: ["cycling", "bike", "ride", "riding", "route", "sportive", "club", "strava", "ftp", "peloton", "chaingang", "puncture", "cyclist"]
+      related: ["health_fitness"]
+
+    - name: "technology"
+      description: "Technology and projects: software, AI agents, home server, devices, side projects"
+      keywords: ["software", "code", "python", "java", "react", "llm", "agent", "mcp", "server", "homelab", "tailscale", "docker", "github", "laptop", "phone"]
+      related: ["employment"]
+
+    - name: "travel"
+      description: "Trips, holidays, flights, hotels and travel plans"
+      keywords: ["holiday", "trip", "flight", "hotel", "travel", "airport", "booking", "abroad", "itinerary"]
+      related: ["finance", "family"]
+
+    - name: "vehicles"
+      description: "Cars and other vehicles: ownership, finance, insurance, MOT, servicing"
+      keywords: ["car", "van", "mot", "servicing", "car insurance", "lease", "pcp", "mileage", "tyre"]
+      related: ["finance"]
+
+    - name: "preferences"
+      description: "Likes, dislikes, tastes, opinions and how the user wants agents to behave"
+      keywords: ["prefer", "preference", "favourite", "favorite", "dislike", "hate"]
+      related: ["profile"]

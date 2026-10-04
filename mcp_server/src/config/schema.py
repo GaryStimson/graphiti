@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from pydantic_settings import (
     BaseSettings,
     PydanticBaseSettingsSource,
@@ -82,6 +82,30 @@ class ServerConfig(BaseModel):
     )
     host: str = Field(default='0.0.0.0', description='Server host')
     port: int = Field(default=8000, description='Server port')
+    secret_path: str | None = Field(
+        default=None,
+        description=(
+            'Unguessable path segment the MCP endpoint is mounted under (http transport only). '
+            'When set, the endpoint is /<secret_path>/mcp and /mcp returns 404.'
+        ),
+    )
+    allowed_hosts: list[str] = Field(
+        default_factory=list,
+        description=(
+            'Host header values accepted by the MCP endpoint (e.g. the Tailscale Funnel '
+            'hostname). When set, DNS rebinding protection is enabled for these hosts.'
+        ),
+    )
+
+    @field_validator('allowed_hosts', mode='before')
+    @classmethod
+    def split_allowed_hosts(cls, value: Any) -> Any:
+        """Accept a comma-separated string (as produced by env var expansion)."""
+        if value is None:
+            return []
+        if isinstance(value, str):
+            return [host.strip() for host in value.split(',') if host.strip()]
+        return value
 
 
 class OpenAIProviderConfig(BaseModel):
@@ -255,6 +279,20 @@ class EdgeTypeMapEntry(BaseModel):
     )
 
 
+class CategoryConfig(BaseModel):
+    """A memory category (life domain) used to tag and retrieve memories.
+
+    ``keywords`` let the server infer categories from free text, and ``related``
+    lists categories that should be recalled alongside this one (for example a
+    mortgage question also pulls in finance and employment memories).
+    """
+
+    name: str
+    description: str
+    keywords: list[str] = Field(default_factory=list)
+    related: list[str] = Field(default_factory=list)
+
+
 class GraphitiAppConfig(BaseModel):
     """Graphiti-specific configuration."""
 
@@ -264,6 +302,15 @@ class GraphitiAppConfig(BaseModel):
     entity_types: list[EntityTypeConfig] = Field(default_factory=list)
     edge_types: list[EdgeTypeConfig] = Field(default_factory=list)
     edge_type_map: list[EdgeTypeMapEntry] = Field(default_factory=list)
+    owner_name: str | None = Field(
+        default=None,
+        description=(
+            'Canonical name of the person this memory is about. First-person statements '
+            '("I", "my", "the user") are attributed to this entity so every agent writes '
+            'to the same node.'
+        ),
+    )
+    categories: list[CategoryConfig] = Field(default_factory=list)
 
     def model_post_init(self, __context) -> None:
         """Convert None to empty string for episode_id_prefix."""

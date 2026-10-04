@@ -86,3 +86,14 @@ class EpisodeEntitiesResponse(TypedDict):
     message: str
     nodes: list[NodeResult]
     edges: list[EdgeResult]
+
+
+class RecallResponse(TypedDict):
+    message: str
+    categories_searched: list[str]
+    facts: list[dict[str, Any]]
+
+
+class CategoryListResponse(TypedDict):
+    message: str
+    categories: list[dict[str, Any]]

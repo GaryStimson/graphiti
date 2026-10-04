@@ -28,16 +28,24 @@ from starlette.responses import JSONResponse
 from config.schema import GraphitiConfig, ServerConfig
 from models.response_types import (
     BuildCommunitiesResponse,
+    CategoryListResponse,
     CommunityResult,
     EpisodeEntitiesResponse,
     EpisodeSearchResponse,
     ErrorResponse,
     FactSearchResponse,
     NodeSearchResponse,
+    RecallResponse,
     SagaSummaryResponse,
     StatusResponse,
     SuccessResponse,
     TripletResponse,
+)
+from services.category_service import (
+    CategoryTaxonomy,
+    encode_source_description,
+    parse_agent,
+    parse_categories,
 )
 from services.factories import (
     CrossEncoderFactory,
@@ -46,6 +54,13 @@ from services.factories import (
     LLMClientFactory,
 )
 from services.queue_service import QueueService
+from services.recall_service import (
+    QUERY_SOURCE,
+    EpisodeTags,
+    select_facts,
+    sort_history,
+)
+from utils.access import build_transport_security, mask_secret_path, mcp_endpoint_path
 from utils.formatting import format_fact_result, to_edge_result, to_node_result
 from utils.type_config import (
     build_edge_type_map,
@@ -135,6 +150,19 @@ config: GraphitiConfig
 
 # MCP server instructions
 GRAPHITI_MCP_INSTRUCTIONS = """
+This is the user's shared personal memory. Several AI agents read and write it, so it holds the
+latest facts about the user across every agent. Use it routinely:
+- Before answering anything personal, call recall with the topic (e.g. "mortgage renewal").
+  recall searches the topic and its related categories (a mortgage question also returns finance
+  and employment facts) and returns only facts that are true now, newest information winning.
+- Whenever the user shares a durable fact, preference, decision or change about themselves, call
+  remember with a short self-contained statement. Newer statements automatically supersede older
+  contradicting ones, so just state the new fact ("My salary is now X from October 2026").
+- Use fact_history to see how something changed over time, and list_categories to see the
+  available categories.
+
+The tools below expose the underlying Graphiti engine for advanced use.
+
 Graphiti is a memory service for AI agents built on a temporally-aware knowledge graph. It performs
 well with dynamic data such as user interactions, changing enterprise data, and external information.
 
@@ -183,6 +211,7 @@ mcp = MCPServer(
 # Global services
 graphiti_service: Optional['GraphitiService'] = None
 queue_service: QueueService | None = None
+category_taxonomy: CategoryTaxonomy = CategoryTaxonomy([])
 
 
 _group_drivers: dict[tuple[int, str], GraphDriver] = {}
@@ -533,6 +562,246 @@ async def add_memory(
         error_msg = str(e)
         logger.error(f'Error queuing episode: {error_msg}')
         return ErrorResponse(error=f'Error queuing episode: {error_msg}')
+
+
+def _owner_instructions(categories: list[str]) -> str:
+    """Extraction guidance that ties first-person statements to the memory owner."""
+    owner = config.graphiti.owner_name
+    lines = [f'This memory belongs to the categories: {", ".join(categories)}.']
+    if owner:
+        lines.append(
+            f'First-person references ("I", "me", "my", "the user") refer to {owner}. '
+            f'Always name that entity exactly "{owner}".'
+        )
+    lines.append(
+        'If the statement updates or replaces an earlier fact (a new amount, date, provider, '
+        'employer, address or preference), extract it as a fact that supersedes the old one.'
+    )
+    return ' '.join(lines)
+
+
+async def _load_episode_tags(
+    driver: GraphDriver, edges: list[EntityEdge]
+) -> dict[str, EpisodeTags]:
+    """Load the category and agent tags of the episodes behind the given facts."""
+    episode_uuids = sorted({uuid for edge in edges for uuid in (edge.episodes or [])})
+    if not episode_uuids:
+        return {}
+    episodes = await EpisodicNode.get_by_uuids(driver, episode_uuids)
+    tags: dict[str, EpisodeTags] = {}
+    for episode in episodes:
+        agent = parse_agent(episode.source_description)
+        tags[episode.uuid] = EpisodeTags(
+            categories=parse_categories(episode.source_description),
+            agents=[agent] if agent else [],
+        )
+    return tags
+
+
+async def _recall_facts(
+    query: str,
+    categories: list[str] | None,
+    include_history: bool,
+    as_of: datetime,
+    max_facts: int,
+    expand_related: bool = True,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Search the query plus each relevant category and select the matching facts."""
+    assert graphiti_service is not None
+    client = await graphiti_service.get_client()
+    group_id = config.graphiti.group_id
+    driver = _driver_for_group(client, group_id)
+
+    strict = bool(categories)
+    base = category_taxonomy.normalize(categories) or category_taxonomy.infer(query)
+    wanted = category_taxonomy.expand(base) if expand_related else base
+
+    # Over-fetch: superseded facts are filtered out after the search.
+    per_search = max_facts * 3
+    searches: list[tuple[str, str]] = [(QUERY_SOURCE, query)]
+    searches.extend(
+        (category, f'{query} {category_taxonomy.search_hint(category)}') for category in wanted
+    )
+
+    # Sequential: FalkorDB group drivers share one connection.
+    hits: list[tuple[EntityEdge, str]] = []
+    for source, search_query in searches:
+        edges = await client.search(
+            group_ids=[group_id], query=search_query, num_results=per_search
+        )
+        hits.extend((edge, source) for edge in edges)
+
+    episode_tags = await _load_episode_tags(driver, [edge for edge, _ in hits])
+    facts = select_facts(
+        hits,
+        episode_tags,
+        categories=wanted,
+        strict_categories=strict,
+        include_history=include_history,
+        as_of=as_of,
+        limit=max_facts,
+    )
+    return facts, wanted
+
+
+@mcp.tool()
+async def remember(
+    content: str,
+    categories: list[str] | None = None,
+    agent: str | None = None,
+    occurred_at: str | None = None,
+    title: str | None = None,
+) -> SuccessResponse | ErrorResponse:
+    """Store a fact, preference, decision or change about the user in shared memory.
+
+    Use this whenever the user tells you something durable about themselves. Write a
+    short, self-contained statement in plain language. When something changes, just
+    state the new fact; the memory automatically marks the older contradicting fact
+    as superseded while keeping its history.
+
+    Processing happens in the background; the fact is searchable after a few seconds.
+
+    Args:
+        content: The statement to remember, e.g. "My mortgage fixed rate ends in March
+            2027 and the lender is Nationwide."
+        categories: Optional category names (see list_categories), e.g. ["property",
+            "finance"]. Inferred from the content when omitted.
+        agent: Name of the agent writing the memory (e.g. "claude", "grok", "openmaus").
+        occurred_at: Optional ISO-8601 time the fact became true, when it differs from
+            now (e.g. "2026-09-01").
+        title: Optional short title for the memory.
+    """
+    global graphiti_service, queue_service
+
+    if graphiti_service is None or queue_service is None:
+        return ErrorResponse(error='Services not initialized')
+    if not content.strip():
+        return ErrorResponse(error='content must not be empty')
+
+    try:
+        parsed_occurred_at = parse_reference_time(occurred_at)
+    except ValueError as e:
+        return ErrorResponse(error=f'Invalid occurred_at: {e}')
+
+    try:
+        resolved = category_taxonomy.resolve(categories, content)
+        group_id = config.graphiti.group_id
+        name = title or f'{", ".join(resolved)} memory'
+
+        await queue_service.add_episode(
+            group_id=group_id,
+            name=name,
+            content=content,
+            source_description=encode_source_description(resolved, agent=agent),
+            episode_type=EpisodeType.text,
+            entity_types=graphiti_service.entity_types,
+            uuid=None,
+            reference_time=parsed_occurred_at,
+            edge_types=graphiti_service.edge_types,
+            edge_type_map=graphiti_service.edge_type_map,
+            custom_extraction_instructions=_owner_instructions(resolved),
+        )
+
+        return SuccessResponse(message=f'Memory queued under categories: {", ".join(resolved)}')
+    except Exception as e:
+        error_msg = str(e)
+        logger.error(f'Error queuing memory: {error_msg}')
+        return ErrorResponse(error=f'Error queuing memory: {error_msg}')
+
+
+@mcp.tool()
+async def recall(
+    query: str,
+    categories: list[str] | None = None,
+    max_facts: int = 20,
+    include_history: bool = False,
+    as_of: str | None = None,
+) -> RecallResponse | ErrorResponse:
+    """Retrieve what is known about the user for a topic, across related categories.
+
+    Call this before answering anything personal. The topic is searched directly and
+    within each relevant category plus its related categories, so a question about a
+    mortgage also returns finance and employment facts. Only facts that are true now
+    are returned unless include_history is set.
+
+    Args:
+        query: The topic or question, e.g. "mortgage renewal options".
+        categories: Optional categories to restrict results to (related categories are
+            added automatically). Inferred from the query when omitted, in which case
+            direct matches outside those categories are still returned.
+        max_facts: Maximum number of facts to return (default 20).
+        include_history: Also return superseded facts, marked with status "superseded".
+        as_of: Optional ISO-8601 time to recall what was true at that moment.
+    """
+    global graphiti_service
+
+    if graphiti_service is None:
+        return ErrorResponse(error='Graphiti service not initialized')
+    if max_facts <= 0:
+        return ErrorResponse(error='max_facts must be a positive integer')
+
+    try:
+        point_in_time = parse_reference_time(as_of) or datetime.now(timezone.utc)
+    except ValueError as e:
+        return ErrorResponse(error=f'Invalid as_of: {e}')
+
+    try:
+        facts, searched = await _recall_facts(
+            query, categories, include_history, point_in_time, max_facts
+        )
+        message = f'Found {len(facts)} facts' if facts else 'No relevant facts found'
+        return RecallResponse(message=message, categories_searched=searched, facts=facts)
+    except Exception as e:
+        error_msg = str(e)
+        logger.error(f'Error recalling memories: {error_msg}')
+        return ErrorResponse(error=f'Error recalling memories: {error_msg}')
+
+
+@mcp.tool()
+async def fact_history(
+    query: str,
+    categories: list[str] | None = None,
+    max_facts: int = 30,
+) -> RecallResponse | ErrorResponse:
+    """Show how facts about a topic changed over time, oldest first.
+
+    Returns current and superseded facts with their valid_at / invalid_at dates, so you
+    can see for example the previous and current salary or mortgage rate.
+
+    Args:
+        query: The topic, e.g. "salary" or "mortgage rate".
+        categories: Optional categories to restrict results to (related categories are
+            not added).
+        max_facts: Maximum number of facts to return (default 30).
+    """
+    global graphiti_service
+
+    if graphiti_service is None:
+        return ErrorResponse(error='Graphiti service not initialized')
+    if max_facts <= 0:
+        return ErrorResponse(error='max_facts must be a positive integer')
+
+    try:
+        facts, searched = await _recall_facts(
+            query, categories, True, datetime.now(timezone.utc), max_facts, expand_related=False
+        )
+        message = f'Found {len(facts)} facts' if facts else 'No relevant facts found'
+        return RecallResponse(
+            message=message, categories_searched=searched, facts=sort_history(facts)
+        )
+    except Exception as e:
+        error_msg = str(e)
+        logger.error(f'Error getting fact history: {error_msg}')
+        return ErrorResponse(error=f'Error getting fact history: {error_msg}')
+
+
+@mcp.tool()
+async def list_categories() -> CategoryListResponse:
+    """List the memory categories, their keywords and which categories are recalled together."""
+    return CategoryListResponse(
+        message=f'{len(category_taxonomy.categories)} categories configured',
+        categories=category_taxonomy.describe(),
+    )
 
 
 @mcp.tool()
@@ -1183,7 +1452,7 @@ async def health_check(request) -> JSONResponse:
 
 async def initialize_server() -> ServerConfig:
     """Parse CLI arguments and initialize the Graphiti server configuration."""
-    global config, graphiti_service, queue_service, graphiti_client, semaphore
+    global config, graphiti_service, queue_service, graphiti_client, semaphore, category_taxonomy
 
     parser = argparse.ArgumentParser(
         description='Run the Graphiti MCP server with YAML configuration support'
@@ -1305,6 +1574,9 @@ async def initialize_server() -> ServerConfig:
         await clear_data(client.driver)
         logger.info('All graphs destroyed')
 
+    category_taxonomy = CategoryTaxonomy(config.graphiti.categories)
+    logger.info(f'  - Categories: {", ".join(category_taxonomy.categories) or "none"}')
+
     # Initialize services
     graphiti_service = GraphitiService(config, SEMAPHORE_LIMIT)
     queue_service = QueueService()
@@ -1328,6 +1600,8 @@ async def run_mcp_server():
 
     # Run the server with configured transport
     logger.info(f'Starting MCP server with transport: {mcp_config.transport}')
+    if mcp_config.secret_path and mcp_config.transport == 'sse':
+        raise ValueError('secret_path is only supported with the http transport')
     if mcp_config.transport == 'stdio':
         await mcp.run_stdio_async()
     elif mcp_config.transport == 'sse':
@@ -1337,26 +1611,39 @@ async def run_mcp_server():
     elif mcp_config.transport == 'http':
         # Use localhost for display if binding to 0.0.0.0
         display_host = 'localhost' if mcp_config.host == '0.0.0.0' else mcp_config.host
+        endpoint_path = mcp_endpoint_path(mcp_config.secret_path)
         logger.info(
             f'Running MCP server with streamable HTTP transport on {mcp_config.host}:{mcp_config.port}'
         )
         logger.info('=' * 60)
         logger.info('MCP Server Access Information:')
         logger.info(f'  Base URL: http://{display_host}:{mcp_config.port}/')
-        logger.info(f'  MCP Endpoint: http://{display_host}:{mcp_config.port}/mcp/')
+        logger.info(
+            f'  MCP Endpoint: http://{display_host}:{mcp_config.port}'
+            f'{mask_secret_path(endpoint_path, mcp_config.secret_path)}/'
+        )
         logger.info('  Transport: HTTP (streamable)')
+        if mcp_config.secret_path:
+            logger.info('  Secret path: enabled (full URL not logged)')
+        else:
+            logger.warning('  Secret path: DISABLED - set MCP_SECRET_PATH before exposing publicly')
 
         # Show FalkorDB Browser UI access if enabled
         if os.environ.get('BROWSER', '1') == '1':
             logger.info(f'  FalkorDB Browser UI: http://{display_host}:3000/')
 
         logger.info('=' * 60)
-        logger.info('For MCP clients, connect to the /mcp/ endpoint above')
+        logger.info('For MCP clients, connect to the MCP endpoint above')
 
         # Configure uvicorn logging to match our format
         configure_uvicorn_logging()
 
-        await mcp.run_streamable_http_async(host=mcp_config.host, port=mcp_config.port)
+        await mcp.run_streamable_http_async(
+            host=mcp_config.host,
+            port=mcp_config.port,
+            streamable_http_path=endpoint_path,
+            transport_security=build_transport_security(mcp_config.allowed_hosts),
+        )
     else:
         raise ValueError(
             f'Unsupported transport: {mcp_config.transport}. Use "sse", "stdio", or "http"'

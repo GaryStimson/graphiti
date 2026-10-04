@@ -2,7 +2,10 @@
 # Combined FalkorDB + Graphiti MCP Server Image
 # This extends the official FalkorDB image to include the MCP server
 
-FROM falkordb/falkordb:latest AS falkordb-base
+# FalkorDB 6.x changed db.idx.fulltext.createNodeIndex, which graphiti-core 0.30.x
+# still calls with the 4.x signature, so pin the last compatible line.
+ARG FALKORDB_VERSION=v4.16.0
+FROM falkordb/falkordb:${FALKORDB_VERSION} AS falkordb-base
 
 # Install Python and system dependencies
 # Note: Debian 13 "trixie" (FalkorDB base) ships with Python 3.13.
