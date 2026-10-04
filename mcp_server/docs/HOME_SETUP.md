@@ -56,18 +56,28 @@ The logs never print the full secret. `http://127.0.0.1:8000/mcp` returns 404 by
 
 ## 2. Expose it with Tailscale Funnel
 
-Use a separate Funnel port so it does not collide with your existing project on 443
-(Funnel allows ports 443, 8443 and 10000):
+Funnel can only publish on ports 443, 8443 and 10000. Use 10000 so the memory server
+does not collide with services already on 443 or 8443:
 
 ```bash
-sudo tailscale funnel --bg --https=8443 http://127.0.0.1:8000
+sudo tailscale funnel --bg --https=10000 http://127.0.0.1:8000
 tailscale funnel status
 ```
 
 Your memory URL is:
 
 ```
-https://<machine>.<tailnet>.ts.net:8443/<MCP_SECRET_PATH>/mcp
+https://<machine>.<tailnet>.ts.net:10000/<MCP_SECRET_PATH>/mcp
+```
+
+If all three Funnel ports are already in use, mount the server under its secret path on
+a port you already publish instead. Funnel strips the mount path and appends the rest of
+the path to the target, so the server still sees `/<secret>/mcp`:
+
+```bash
+sudo tailscale funnel --bg --https=443 --set-path=/<MCP_SECRET_PATH> \
+  http://127.0.0.1:8000/<MCP_SECRET_PATH>
+# URL: https://<machine>.<tailnet>.ts.net/<MCP_SECRET_PATH>/mcp
 ```
 
 Set `MCP_ALLOWED_HOSTS=<machine>.<tailnet>.ts.net` in `.env` (then restart) so requests
@@ -82,12 +92,12 @@ Use the same URL everywhere.
 
 - **Claude (claude.ai, Desktop, mobile):** Settings → Connectors → Add custom connector →
   paste the URL. Leave the OAuth fields empty.
-- **Claude Code:** `claude mcp add --transport http memory "https://…:8443/<secret>/mcp"`
+- **Claude Code:** `claude mcp add --transport http memory "https://…:10000/<secret>/mcp"`
 - **Grok (xAI API) / bots built on it:** add a remote MCP tool with `server_url` set to the
   URL.
 - **OpenMausBot or any other MCP client:** add a Streamable HTTP MCP server with the URL.
   If a client only supports stdio, bridge it with
-  `npx mcp-remote "https://…:8443/<secret>/mcp"`.
+  `npx mcp-remote "https://…:10000/<secret>/mcp"`.
 
 ### Recommended agent instructions
 
