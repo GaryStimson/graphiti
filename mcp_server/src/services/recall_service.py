@@ -134,6 +134,7 @@ def select_facts(
     include_history: bool,
     as_of: datetime,
     limit: int,
+    include_upcoming: bool = False,
 ) -> list[dict[str, Any]]:
     """Filter, de-duplicate and format search hits in priority order.
 
@@ -149,6 +150,9 @@ def select_facts(
         include_history: Keep superseded and not-yet-valid facts.
         as_of: The point in time used to decide whether a fact is current.
         limit: Maximum number of facts to return.
+        include_upcoming: Keep not-yet-valid facts (plans, future dates) even without
+            include_history; they carry status "not_yet_valid". Superseded facts still
+            need include_history.
     """
     wanted = set(categories)
     selected: dict[str, dict[str, Any]] = {}
@@ -168,7 +172,8 @@ def select_facts(
             continue
 
         status = fact_status(edge, as_of)
-        if status != 'current' and not include_history:
+        keep = status == 'current' or (include_upcoming and status == 'not_yet_valid')
+        if not keep and not include_history:
             continue
 
         if len(order) >= limit:

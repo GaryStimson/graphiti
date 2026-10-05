@@ -640,6 +640,7 @@ async def _recall_facts(
     as_of: datetime,
     max_facts: int,
     expand_related: bool = True,
+    include_upcoming: bool = False,
 ) -> tuple[list[dict[str, Any]], list[str]]:
     """Search the query plus each relevant category and select the matching facts."""
     assert graphiti_service is not None
@@ -675,6 +676,7 @@ async def _recall_facts(
         include_history=include_history,
         as_of=as_of,
         limit=max_facts,
+        include_upcoming=include_upcoming,
     )
     return facts, wanted
 
@@ -978,8 +980,9 @@ async def recall(
 
     Call this before answering anything personal. The topic is searched directly and
     within each relevant category plus its related categories, so a question about a
-    mortgage also returns finance and employment facts. Only facts that are true now
-    are returned unless include_history is set.
+    mortgage also returns finance and employment facts. Facts that are true now and
+    upcoming ones (plans, future dates; status "not_yet_valid") are returned; superseded
+    facts only when include_history is set.
 
     Args:
         query: The topic or question, e.g. "mortgage renewal options".
@@ -1003,8 +1006,14 @@ async def recall(
         return ErrorResponse(error=f'Invalid as_of: {e}')
 
     try:
+        # Upcoming facts (plans, future dates) are relevant now; a past as_of excludes them.
         facts, searched = await _recall_facts(
-            query, categories, include_history, point_in_time, max_facts
+            query,
+            categories,
+            include_history,
+            point_in_time,
+            max_facts,
+            include_upcoming=as_of is None,
         )
         message = f'Found {len(facts)} facts' if facts else 'No relevant facts found'
         return RecallResponse(message=message, categories_searched=searched, facts=facts)

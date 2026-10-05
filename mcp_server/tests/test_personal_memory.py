@@ -134,6 +134,15 @@ class TestSelectFacts:
             ('new', 'current'),
         ]
 
+    def test_upcoming_facts_kept_only_when_requested(self):
+        old = make_edge('old', ['ep-property'], invalid_at=NOW - timedelta(days=14))
+        soon = make_edge('soon', ['ep-property'], valid_at=NOW + timedelta(days=90))
+        hits = [(old, QUERY_SOURCE), (soon, QUERY_SOURCE)]
+
+        assert self.select(hits, ['property']) == []
+        upcoming = select_facts(hits, self.tags, ['property'], False, False, NOW, 10, True)
+        assert [(f['uuid'], f['status']) for f in upcoming] == [('soon', 'not_yet_valid')]
+
     def test_category_hits_must_carry_their_category(self):
         finance = make_edge('fin', ['ep-finance'])
         gym = make_edge('gym', ['ep-gym'])
