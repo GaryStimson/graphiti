@@ -87,6 +87,35 @@ Your memory URL is:
 https://<machine>.<tailnet>.ts.net:10000/<MCP_SECRET_PATH>/mcp
 ```
 
+### Optional: Cloudflare Tunnel on standard port 443
+
+Some clients (e.g. Anthropic's custom connectors) could not reach Funnel on 8443/10000.
+A named Cloudflare Tunnel serves the same server on a hostname at port 443. It needs a
+domain on Cloudflare (a free account is enough); `trycloudflare.com` quick tunnels are only
+for testing because the hostname changes on every start.
+
+1. Install `cloudflared`, run `cloudflared tunnel login`, `cloudflared tunnel create home-mcp`,
+   and `cloudflared tunnel route dns home-mcp memory.<your-domain>`.
+2. `~/.cloudflared/config.yml`:
+   ```yaml
+   tunnel: <TUNNEL-ID>
+   credentials-file: <path to the tunnel JSON>
+   ingress:
+     - hostname: memory.<your-domain>
+       service: http://127.0.0.1:8000   # your MCP_HOST_PORT
+     - service: http_status:404
+   ```
+3. Add `memory.<your-domain>` to `MCP_ALLOWED_HOSTS` and recreate the container.
+4. Windows service: run `cloudflared service install`, then point the service at your config so
+   the SYSTEM account does not need its own copy (the default install exits immediately):
+   ```powershell
+   $bin = '"C:\Program Files (x86)\cloudflared\cloudflared.exe" --config "C:\Users\<you>\.cloudflared\config.yml" tunnel run home-mcp'
+   Set-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Services\cloudflared" -Name ImagePath -Value $bin
+   Start-Service cloudflared
+   ```
+
+The secret path still protects the endpoint; Tailscale Funnel can stay enabled alongside it.
+
 If all three Funnel ports are already in use, mount the server under its secret path on
 a port you already publish instead. Funnel strips the mount path and appends the rest of
 the path to the target, so the server still sees `/<secret>/mcp`:
