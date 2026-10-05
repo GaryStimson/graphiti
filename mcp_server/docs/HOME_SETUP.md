@@ -55,12 +55,18 @@ cd graphiti/mcp_server
 cp .env.home.example .env
 python3 -c 'import secrets; print(secrets.token_urlsafe(32))'   # paste into MCP_SECRET_PATH
 nano .env                                                        # fill in the rest
-docker compose -f docker/docker-compose-home.yml up -d --build
-docker compose -f docker/docker-compose-home.yml logs -f        # wait for "MCP Server Access Information"
+docker compose --env-file .env -f docker/docker-compose-home.yml up -d --build
+docker compose --env-file .env -f docker/docker-compose-home.yml logs -f   # wait for "MCP Server Access Information"
 curl http://127.0.0.1:8000/health
 ```
 
+Always pass `--env-file .env` (including for `up`, `down`, `restart`): Compose only reads
+`${MCP_HOST_PORT}` from there, not from the container's `env_file`.
+
 The logs never print the full secret. `http://127.0.0.1:8000/mcp` returns 404 by design.
+
+If something else already uses port 8000 on the host, set `MCP_HOST_PORT=8100` (any free
+port) in `.env` and use that port in the health check and the Funnel command below.
 
 ## 2. Expose it with Tailscale Funnel
 
@@ -71,6 +77,9 @@ does not collide with services already on 443 or 8443:
 sudo tailscale funnel --bg --https=10000 http://127.0.0.1:8000
 tailscale funnel status
 ```
+
+(On Windows there is no `sudo`; run `tailscale funnel ...` directly. Funnel on a non-443
+port sends `Host: <machine>.<tailnet>.ts.net:10000`; the server accepts the host with any port.)
 
 Your memory URL is:
 

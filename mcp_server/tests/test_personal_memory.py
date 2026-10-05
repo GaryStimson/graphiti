@@ -196,6 +196,9 @@ class TestAccess:
         assert settings.enable_dns_rebinding_protection
         assert 'home.tail1.ts.net' in settings.allowed_hosts
         assert 'https://home.tail1.ts.net' in settings.allowed_origins
+        # Funnel on port 10000 sends the port in the Host header
+        assert 'home.tail1.ts.net:*' in settings.allowed_hosts
+        assert 'https://home.tail1.ts.net:*' in settings.allowed_origins
 
     def test_allowed_hosts_accepts_comma_separated_string(self):
         assert ServerConfig(allowed_hosts='a.ts.net, b.ts.net,').allowed_hosts == [  # type: ignore[arg-type]

@@ -98,6 +98,41 @@ class QueueService:
         self._graphiti_client = graphiti_client
         logger.info('Queue service initialized with graphiti client')
 
+    async def _ensure_episode_node(
+        self,
+        uuid: str,
+        name: str,
+        content: str,
+        source_description: str,
+        episode_type: Any,
+        group_id: str,
+        reference_time: datetime,
+    ) -> None:
+        """Create the episode node for a caller-chosen uuid unless it already exists."""
+        from graphiti_core.errors import NodeNotFoundError
+        from graphiti_core.nodes import EpisodicNode
+
+        # Same driver selection as Graphiti.add_episode: FalkorDB uses one graph per group_id.
+        driver = self._graphiti_client.driver
+        if group_id != driver._database:
+            driver = driver.clone(database=group_id)
+        try:
+            await EpisodicNode.get_by_uuid(driver, uuid)
+            return
+        except NodeNotFoundError:
+            pass
+        await EpisodicNode(
+            uuid=uuid,
+            name=name,
+            group_id=group_id,
+            labels=[],
+            source=episode_type,
+            content=content,
+            source_description=source_description,
+            created_at=datetime.now(timezone.utc),
+            valid_at=reference_time,
+        ).save(driver)
+
     async def add_episode(
         self,
         group_id: str,
@@ -153,6 +188,19 @@ class QueueService:
             """Process the episode using the graphiti client."""
             try:
                 logger.info(f'Processing episode {uuid} for group {group_id}')
+
+                # graphiti-core treats `uuid` as an EXISTING episode to (re)process and raises
+                # NodeNotFoundError otherwise, so create the episode under that uuid first.
+                if uuid:
+                    await self._ensure_episode_node(
+                        uuid=uuid,
+                        name=name,
+                        content=content,
+                        source_description=source_description,
+                        episode_type=episode_type,
+                        group_id=group_id,
+                        reference_time=reference_time or datetime.now(timezone.utc),
+                    )
 
                 # Process the episode using the graphiti client
                 await self._graphiti_client.add_episode(

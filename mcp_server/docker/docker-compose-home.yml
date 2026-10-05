@@ -29,7 +29,7 @@ services:
       - personal_memory_data:/var/lib/falkordb/data
       - personal_memory_logs:/var/log/graphiti
     ports:
-      - "127.0.0.1:8000:8000"  # MCP server (Tailscale Funnel target)
+      - "127.0.0.1:${MCP_HOST_PORT:-8000}:8000"  # MCP server (Tailscale Funnel target; set MCP_HOST_PORT if 8000 is taken)
       - "127.0.0.1:3000:3000"  # FalkorDB browser UI (local only; never funnel this)
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]

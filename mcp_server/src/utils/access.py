@@ -46,8 +46,12 @@ def build_transport_security(allowed_hosts: list[str]) -> TransportSecuritySetti
     """
     if not allowed_hosts:
         return None
-    hosts = [*allowed_hosts, '127.0.0.1:*', 'localhost:*']
+    # Tailscale Funnel on a non-443 port (e.g. 10000) sends "Host: name.ts.net:10000",
+    # so each public host is allowed bare and with any port.
+    hosts = [*allowed_hosts, *(f'{host}:*' for host in allowed_hosts), '127.0.0.1:*', 'localhost:*']
     origins = [f'https://{host}' for host in allowed_hosts] + [
+        f'https://{host}:*' for host in allowed_hosts
+    ] + [
         'http://127.0.0.1:*',
         'http://localhost:*',
     ]
