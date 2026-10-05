@@ -61,6 +61,9 @@ graphiti:
   episode_id_prefix: ${EPISODE_ID_PREFIX:}
   user_id: ${USER_ID:owner}
   owner_name: ${MEMORY_OWNER_NAME:}
+  # Notes longer than this are split at headings/paragraphs into linked parts so each
+  # part gets a thorough fact extraction. get_note reassembles them.
+  note_part_chars: ${NOTE_PART_CHARS:2000}
 
   entity_types:
     - name: "Preference"

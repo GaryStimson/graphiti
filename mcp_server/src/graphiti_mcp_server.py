@@ -35,7 +35,10 @@ from models.response_types import (
     ErrorResponse,
     FactSearchResponse,
     NodeSearchResponse,
+    NoteResponse,
+    NoteSearchResponse,
     RecallResponse,
+    RememberResponse,
     SagaSummaryResponse,
     StatusResponse,
     SuccessResponse,
@@ -52,6 +55,20 @@ from services.factories import (
     DatabaseDriverFactory,
     EmbedderFactory,
     LLMClientFactory,
+)
+from services.notes_service import (
+    NoteRef,
+    assemble_note,
+    derive_title,
+    excerpt,
+    iso,
+    new_note_id,
+    note_summary,
+    note_tags,
+    parse_note_ref,
+    part_uuid,
+    rank_notes,
+    split_note,
 )
 from services.queue_service import QueueService
 from services.recall_service import (
@@ -158,6 +175,9 @@ latest facts about the user across every agent. Use it routinely:
 - Whenever the user shares a durable fact, preference, decision or change about themselves, call
   remember with a short self-contained statement. Newer statements automatically supersede older
   contradicting ones, so just state the new fact ("My salary is now X from October 2026").
+- Longer notes are fine in remember. Each recalled fact lists its source notes with an
+  excerpt; call get_note to read a note in full, and search_notes to find notes by keyword or
+  meaning.
 - Use fact_history to see how something changed over time, and list_categories to see the
   available categories.
 
@@ -564,10 +584,18 @@ async def add_memory(
         return ErrorResponse(error=f'Error queuing episode: {error_msg}')
 
 
-def _owner_instructions(categories: list[str]) -> str:
+def _owner_instructions(
+    categories: list[str],
+    title: str | None = None,
+    ref: NoteRef | None = None,
+    heading: str | None = None,
+) -> str:
     """Extraction guidance that ties first-person statements to the memory owner."""
     owner = config.graphiti.owner_name
     lines = [f'This memory belongs to the categories: {", ".join(categories)}.']
+    if ref is not None and ref.parts > 1:
+        context = f'This is part {ref.part} of {ref.parts} of the note "{title}"'
+        lines.append(f'{context}, under the heading "{heading}".' if heading else f'{context}.')
     if owner:
         lines.append(
             f'First-person references ("I", "me", "my", "the user") refer to {owner}. '
@@ -588,14 +616,21 @@ async def _load_episode_tags(
     if not episode_uuids:
         return {}
     episodes = await EpisodicNode.get_by_uuids(driver, episode_uuids)
-    tags: dict[str, EpisodeTags] = {}
-    for episode in episodes:
-        agent = parse_agent(episode.source_description)
-        tags[episode.uuid] = EpisodeTags(
-            categories=parse_categories(episode.source_description),
-            agents=[agent] if agent else [],
-        )
-    return tags
+    return {episode.uuid: _episode_tags(episode) for episode in episodes}
+
+
+def _episode_tags(episode: EpisodicNode) -> EpisodeTags:
+    """Tags, note identity and content of an episode."""
+    agent = parse_agent(episode.source_description)
+    ref = parse_note_ref(episode.source_description)
+    return EpisodeTags(
+        categories=parse_categories(episode.source_description),
+        agents=[agent] if agent else [],
+        note_id=ref.note_id if ref else episode.uuid,
+        title=episode.name,
+        recorded_at=iso(episode.created_at),
+        content=episode.content,
+    )
 
 
 async def _recall_facts(
@@ -651,25 +686,28 @@ async def remember(
     agent: str | None = None,
     occurred_at: str | None = None,
     title: str | None = None,
-) -> SuccessResponse | ErrorResponse:
-    """Store a fact, preference, decision or change about the user in shared memory.
+) -> RememberResponse | ErrorResponse:
+    """Store a fact, note, decision or change about the user in shared memory.
 
-    Use this whenever the user tells you something durable about themselves. Write a
-    short, self-contained statement in plain language. When something changes, just
-    state the new fact; the memory automatically marks the older contradicting fact
-    as superseded while keeping its history.
+    Use this whenever the user tells you something durable about themselves. A short,
+    self-contained statement works best for a single fact. Longer notes (finances,
+    personal circumstances, plans) are fine too: the full text is kept and can be read
+    back with get_note, and long notes are split at headings and paragraphs so every
+    part is searched for facts. When something changes, just state the new fact; the
+    older contradicting fact is marked as superseded and its history is kept.
 
-    Processing happens in the background; the fact is searchable after a few seconds.
+    Processing happens in the background; facts are searchable after a few seconds
+    (longer for long notes).
 
     Args:
-        content: The statement to remember, e.g. "My mortgage fixed rate ends in March
-            2027 and the lender is Nationwide."
+        content: The statement or note to remember, e.g. "My mortgage fixed rate ends in
+            March 2027 and the lender is Nationwide." Markdown headings are respected.
         categories: Optional category names (see list_categories), e.g. ["property",
             "finance"]. Inferred from the content when omitted.
         agent: Name of the agent writing the memory (e.g. "claude", "grok", "openmaus").
-        occurred_at: Optional ISO-8601 time the fact became true, when it differs from
-            now (e.g. "2026-09-01").
-        title: Optional short title for the memory.
+        occurred_at: Optional ISO-8601 time the content became true, when it differs
+            from now (e.g. "2026-09-01").
+        title: Optional short title. Defaults to the note's first heading or line.
     """
     global graphiti_service, queue_service
 
@@ -684,29 +722,248 @@ async def remember(
         return ErrorResponse(error=f'Invalid occurred_at: {e}')
 
     try:
+        explicit = category_taxonomy.normalize(categories)
         resolved = category_taxonomy.resolve(categories, content)
         group_id = config.graphiti.group_id
-        name = title or f'{", ".join(resolved)} memory'
+        note_title = title or derive_title(content) or f'{", ".join(resolved)} memory'
+        note_id = new_note_id()
+        parts = split_note(content, config.graphiti.note_part_chars)
 
-        await queue_service.add_episode(
-            group_id=group_id,
-            name=name,
-            content=content,
-            source_description=encode_source_description(resolved, agent=agent),
-            episode_type=EpisodeType.text,
-            entity_types=graphiti_service.entity_types,
-            uuid=None,
-            reference_time=parsed_occurred_at,
-            edge_types=graphiti_service.edge_types,
-            edge_type_map=graphiti_service.edge_type_map,
-            custom_extraction_instructions=_owner_instructions(resolved),
+        # Without explicit categories, each part of a long note is categorized on its own
+        # text, so a section about a pension is not tagged with the note's cycling costs.
+        part_categories = [
+            explicit
+            or (
+                category_taxonomy.infer(f'{part.heading or ""}\n{part.text}')
+                if len(parts) > 1
+                else []
+            )
+            or resolved
+            for part in parts
+        ]
+        all_categories = list(dict.fromkeys(c for cats in part_categories for c in cats))
+
+        # Parts of one note are queued in order on the group's sequential queue, and
+        # each part is given the previous part as extraction context.
+        for index, (part, part_cats) in enumerate(
+            zip(parts, part_categories, strict=True), start=1
+        ):
+            ref = NoteRef(note_id=note_id, part=index, parts=len(parts))
+            await queue_service.add_episode(
+                group_id=group_id,
+                name=note_title,
+                content=part.text,
+                source_description=encode_source_description(
+                    part_cats, agent=agent, extra=note_tags(ref)
+                ),
+                episode_type=EpisodeType.text,
+                entity_types=graphiti_service.entity_types,
+                uuid=part_uuid(note_id, index),
+                reference_time=parsed_occurred_at,
+                edge_types=graphiti_service.edge_types,
+                edge_type_map=graphiti_service.edge_type_map,
+                previous_episode_uuids=[part_uuid(note_id, index - 1)] if index > 1 else None,
+                custom_extraction_instructions=_owner_instructions(
+                    part_cats, note_title, ref, part.heading
+                ),
+            )
+
+        return RememberResponse(
+            message=f'Memory queued under categories: {", ".join(all_categories)}',
+            note_id=note_id,
+            title=note_title,
+            parts=len(parts),
+            categories=all_categories,
         )
-
-        return SuccessResponse(message=f'Memory queued under categories: {", ".join(resolved)}')
     except Exception as e:
         error_msg = str(e)
         logger.error(f'Error queuing memory: {error_msg}')
         return ErrorResponse(error=f'Error queuing memory: {error_msg}')
+
+
+@mcp.tool()
+async def get_note(note_id: str) -> NoteResponse | ErrorResponse:
+    """Read a stored note in full.
+
+    Use this when a recalled fact or a search_notes result needs its full context.
+    Long notes that were split into parts are reassembled in order.
+
+    Args:
+        note_id: The note_id from remember, a recall fact's sources, or search_notes.
+            An episode UUID from the lower-level tools also works.
+    """
+    global graphiti_service
+
+    if graphiti_service is None:
+        return ErrorResponse(error='Graphiti service not initialized')
+
+    try:
+        client = await graphiti_service.get_client()
+        driver = _driver_for_group(client, config.graphiti.group_id)
+
+        # The ID is either a note ID (whose first part has a derived UUID) or the UUID
+        # of an episode, possibly one part of a longer note.
+        found = await EpisodicNode.get_by_uuids(driver, [note_id, part_uuid(note_id, 1)])
+        if not found:
+            return ErrorResponse(error=f'No note found with ID {note_id}')
+        first = found[0]
+        ref = parse_note_ref(first.source_description)
+        if ref is None:
+            episodes = [first]
+        else:
+            episodes = await EpisodicNode.get_by_uuids(
+                driver, [part_uuid(ref.note_id, i) for i in range(1, ref.parts + 1)]
+            )
+            if not episodes:
+                episodes = [first]
+
+        tags = _episode_tags(first)
+        numbered = [
+            ((parse_note_ref(e.source_description) or NoteRef(e.uuid, 1, 1)).part, e)
+            for e in episodes
+        ]
+        expected = ref.parts if ref else 1
+        missing = expected - len(numbered)
+        message = 'Note retrieved'
+        if missing > 0:
+            message += f' ({missing} of {expected} parts are still being processed or missing)'
+
+        return NoteResponse(
+            message=message,
+            note=note_summary(
+                note_id=tags.note_id or first.uuid,
+                title=first.name,
+                recorded_at=tags.recorded_at,
+                agent=tags.agents[0] if tags.agents else None,
+                categories=list(
+                    dict.fromkeys(c for _, e in numbered for c in _episode_tags(e).categories)
+                ),
+                parts=expected,
+                content=assemble_note([(part, e.content) for part, e in numbered]),
+            ),
+        )
+    except Exception as e:
+        error_msg = str(e)
+        logger.error(f'Error getting note: {error_msg}')
+        return ErrorResponse(error=f'Error getting note: {error_msg}')
+
+
+@mcp.tool()
+async def search_notes(
+    query: str,
+    categories: list[str] | None = None,
+    max_notes: int = 5,
+) -> NoteSearchResponse | ErrorResponse:
+    """Search the full text of stored notes by keyword and by meaning.
+
+    Keyword search runs over note text; meaning search finds facts semantically related
+    to the query and returns the notes they came from. Each result has an excerpt; call
+    get_note with its note_id to read it in full. Use recall instead when you need
+    current facts rather than the notes themselves.
+
+    Args:
+        query: What to look for, e.g. "pension contributions" or "why I chose a fixed rate".
+        categories: Optional categories to restrict results to.
+        max_notes: Maximum number of notes to return (default 5).
+    """
+    global graphiti_service
+
+    if graphiti_service is None:
+        return ErrorResponse(error='Graphiti service not initialized')
+    if max_notes <= 0:
+        return ErrorResponse(error='max_notes must be a positive integer')
+
+    try:
+        from graphiti_core.search.search_config import (
+            EdgeReranker,
+            EdgeSearchConfig,
+            EdgeSearchMethod,
+            EpisodeReranker,
+            EpisodeSearchConfig,
+            EpisodeSearchMethod,
+            SearchConfig,
+        )
+
+        client = await graphiti_service.get_client()
+        group_id = config.graphiti.group_id
+        driver = _driver_for_group(client, group_id)
+        wanted = set(category_taxonomy.normalize(categories))
+
+        per_search = max_notes * 4
+        results = await client.search_(
+            query=query,
+            config=SearchConfig(
+                episode_config=EpisodeSearchConfig(
+                    search_methods=[EpisodeSearchMethod.bm25], reranker=EpisodeReranker.rrf
+                ),
+                edge_config=EdgeSearchConfig(
+                    search_methods=[EdgeSearchMethod.cosine_similarity],
+                    reranker=EdgeReranker.rrf,
+                ),
+                limit=per_search,
+            ),
+            group_ids=[group_id],
+        )
+
+        episodes: dict[str, EpisodicNode] = {e.uuid: e for e in results.episodes}
+        keyword_uuids = [e.uuid for e in results.episodes]
+        meaning_uuids: list[str] = []
+        facts_by_episode: dict[str, list[str]] = {}
+        for edge in results.edges:
+            for episode_uuid in edge.episodes or []:
+                if episode_uuid not in meaning_uuids:
+                    meaning_uuids.append(episode_uuid)
+                facts_by_episode.setdefault(episode_uuid, []).append(edge.fact)
+        missing = [uuid for uuid in meaning_uuids if uuid not in episodes]
+        if missing:
+            episodes.update({e.uuid: e for e in await EpisodicNode.get_by_uuids(driver, missing)})
+
+        tags = {uuid: _episode_tags(episode) for uuid, episode in episodes.items()}
+
+        def note_key(uuid: str) -> str:
+            return tags[uuid].note_id or uuid
+
+        def allowed(uuid: str) -> bool:
+            return uuid in tags and (not wanted or bool(wanted & set(tags[uuid].categories)))
+
+        keyword_notes = list(dict.fromkeys(note_key(u) for u in keyword_uuids if allowed(u)))
+        meaning_notes = list(dict.fromkeys(note_key(u) for u in meaning_uuids if allowed(u)))
+
+        notes = []
+        for key in rank_notes([keyword_notes, meaning_notes])[:max_notes]:
+            part_uuids = [
+                u for u in [*keyword_uuids, *meaning_uuids] if allowed(u) and note_key(u) == key
+            ]
+            best = tags[part_uuids[0]]
+            ref = parse_note_ref(episodes[part_uuids[0]].source_description)
+            related = [f for u in part_uuids for f in facts_by_episode.get(u, [])]
+            notes.append(
+                note_summary(
+                    note_id=key,
+                    title=best.title or '',
+                    recorded_at=best.recorded_at,
+                    agent=best.agents[0] if best.agents else None,
+                    categories=best.categories,
+                    parts=ref.parts if ref else 1,
+                    matched=[
+                        label
+                        for label, ranked in (
+                            ('keyword', keyword_notes),
+                            ('meaning', meaning_notes),
+                        )
+                        if key in ranked
+                    ],
+                    excerpt=excerpt(best.content or '', query),
+                    related_facts=list(dict.fromkeys(related))[:3],
+                )
+            )
+
+        message = f'Found {len(notes)} notes' if notes else 'No matching notes found'
+        return NoteSearchResponse(message=message, notes=notes)
+    except Exception as e:
+        error_msg = str(e)
+        logger.error(f'Error searching notes: {error_msg}')
+        return ErrorResponse(error=f'Error searching notes: {error_msg}')
 
 
 @mcp.tool()

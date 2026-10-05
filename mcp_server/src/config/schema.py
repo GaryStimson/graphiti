@@ -311,6 +311,11 @@ class GraphitiAppConfig(BaseModel):
         ),
     )
     categories: list[CategoryConfig] = Field(default_factory=list)
+    note_part_chars: int = Field(
+        default=2000,
+        ge=200,
+        description='Notes longer than this many characters are split into parts for extraction',
+    )
 
     def model_post_init(self, __context) -> None:
         """Convert None to empty string for episode_id_prefix."""

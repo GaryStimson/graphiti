@@ -1,7 +1,7 @@
 # Graphiti MCP Server
 
 > **Personal memory fork:** this fork adds `remember` / `recall` / `fact_history` /
-> `list_categories` tools, category-aware recall, a secret-path endpoint for Tailscale
+> `get_note` / `search_notes` / `list_categories` tools, category-aware recall, a secret-path endpoint for Tailscale
 > Funnel and a home Docker Compose setup. See [docs/HOME_SETUP.md](docs/HOME_SETUP.md).
 
 Graphiti is a framework for building and querying temporally-aware knowledge graphs, specifically tailored for AI agents

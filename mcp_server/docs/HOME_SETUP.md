@@ -12,6 +12,7 @@ newer fact automatically supersedes an older one while the history is kept.
 | `remember`, `recall`, `fact_history`, `list_categories` tools, designed for agents to call routinely | `src/graphiti_mcp_server.py` |
 | Category taxonomy with keyword inference and related-category recall (a mortgage question also returns finance and employment facts) | `config/config-home.yaml`, `src/services/category_service.py` |
 | Current-only recall by default, plus `as_of` point-in-time recall and full history | `src/services/recall_service.py` |
+| Notes: full text kept, `get_note` / `search_notes` tools, source notes with excerpts on every recalled fact, long notes split into linked parts | `src/services/notes_service.py` |
 | Secret URL path for the MCP endpoint, and Host-header checking for your Tailscale hostname | `src/utils/access.py` |
 | Owner name: "I"/"my" from any agent resolves to the same person entity | `graphiti.owner_name` |
 | Home Docker Compose (localhost-only ports, persistent volume) with FalkorDB pinned to 4.16 | `docker/docker-compose-home.yml` |
@@ -29,6 +30,13 @@ All upstream tools (`add_memory`, `search_memory_facts`, ...) are still availabl
   `recall("remortgage options")` infers `property` and expands it to `property`, `finance`
   and `employment`. It then runs one hybrid search (semantic + keyword + graph) for the
   query and one per category, and merges the results.
+- **Notes.** Agents can `remember` anything from a one-line fact to a long note (finances,
+  personal circumstances, plans). The full text is kept, and facts are extracted from it.
+  Every fact `recall` returns lists the notes it came from, with the supporting sentence;
+  `get_note` reads a note in full and `search_notes` finds notes by keyword or meaning.
+  Notes longer than `note_part_chars` (2,000 characters by default) are split at headings
+  and paragraphs into linked parts. Each part gets its own fact extraction and categories,
+  and `get_note` reassembles them.
 - **Time.** Each fact carries `valid_at` / `invalid_at`. `recall` returns only facts that
   are true now. `fact_history` shows superseded facts too, oldest first. `recall(as_of=...)`
   answers "what was true on that date".
@@ -106,8 +114,9 @@ system prompt or custom instructions, also add:
 
 > You share a long-term memory with my other AI assistants through the `memory` MCP server.
 > Before answering anything about me, my plans, finances, home, work, health, family or
-> hobbies, call `recall` with the topic. Whenever I tell you a lasting fact, preference,
-> decision or change, call `remember` with a short self-contained statement, the
+> hobbies, call `recall` with the topic, and use `get_note` when a fact's source note would
+> give useful detail. Whenever I tell you a lasting fact, preference, decision or change,
+> call `remember` with a short self-contained statement (or a fuller note with headings), the
 > relevant categories, and `agent` set to your name. When something changes, just
 > remember the new fact; older facts are superseded automatically.
 
@@ -126,7 +135,8 @@ system prompt or custom instructions, also add:
 
 - **Backup:** `docker exec <container> redis-cli BGSAVE`, then
   `docker run --rm -v personal_memory_data:/data -v "$PWD":/backup alpine tar czf /backup/memory-$(date +%F).tgz -C /data .`
-- **Cost:** each `remember` makes a handful of small LLM calls plus embeddings. `recall`
+- **Cost:** each `remember` makes a handful of small LLM calls plus embeddings per note
+  part, so a long note costs roughly one short memory per 2,000 characters. `recall`
   only makes embedding calls.
 - **Rate limits:** lower `SEMAPHORE_LIMIT` if the logs show 429 errors.
 - **Updating from upstream:** use GitHub's "Sync fork" on the `main` branch, then merge

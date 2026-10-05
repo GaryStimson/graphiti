@@ -97,3 +97,21 @@ class RecallResponse(TypedDict):
 class CategoryListResponse(TypedDict):
     message: str
     categories: list[dict[str, Any]]
+
+
+class RememberResponse(TypedDict):
+    message: str
+    note_id: str
+    title: str
+    parts: int
+    categories: list[str]
+
+
+class NoteResponse(TypedDict):
+    message: str
+    note: dict[str, Any]
+
+
+class NoteSearchResponse(TypedDict):
+    message: str
+    notes: list[dict[str, Any]]

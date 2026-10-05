@@ -13,17 +13,24 @@ from typing import Any, Literal
 
 from graphiti_core.edges import EntityEdge
 
+from services.notes_service import excerpt
+
 FactStatus = Literal['current', 'superseded', 'not_yet_valid']
 
 QUERY_SOURCE = 'query'
+MAX_SOURCES = 3
 
 
 @dataclass
 class EpisodeTags:
-    """Categories and writing agents of the episodes behind a fact."""
+    """Categories, writing agents and source note of the episodes behind a fact."""
 
     categories: list[str] = field(default_factory=list)
     agents: list[str] = field(default_factory=list)
+    note_id: str | None = None
+    title: str | None = None
+    recorded_at: str | None = None
+    content: str | None = None
 
 
 def _aware(value: datetime | None) -> datetime | None:
@@ -70,8 +77,38 @@ def tags_for_edge(edge: EntityEdge, episode_tags: dict[str, EpisodeTags]) -> Epi
     return combined
 
 
+def sources_for_edge(
+    edge: EntityEdge, episode_tags: dict[str, EpisodeTags], max_sources: int = MAX_SOURCES
+) -> list[dict[str, Any]]:
+    """The notes a fact came from, newest first, with the passage that supports it.
+
+    Pass a source's note_id to get_note to read the whole note.
+    """
+    sources: dict[str, dict[str, Any]] = {}
+    for episode_uuid in edge.episodes or []:
+        tags = episode_tags.get(episode_uuid)
+        if tags is None or tags.content is None:
+            continue
+        note_id = tags.note_id or episode_uuid
+        if note_id in sources:
+            continue
+        sources[note_id] = {
+            'note_id': note_id,
+            'title': tags.title,
+            'recorded_at': tags.recorded_at,
+            'agent': tags.agents[0] if tags.agents else None,
+            'excerpt': excerpt(tags.content, edge.fact),
+        }
+    ordered = sorted(sources.values(), key=lambda s: s['recorded_at'] or '', reverse=True)
+    return ordered[:max_sources]
+
+
 def format_recalled_fact(
-    edge: EntityEdge, status: FactStatus, tags: EpisodeTags, matched: list[str]
+    edge: EntityEdge,
+    status: FactStatus,
+    tags: EpisodeTags,
+    matched: list[str],
+    sources: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Compact, agent-friendly view of a fact."""
     return {
@@ -85,6 +122,7 @@ def format_recalled_fact(
         'categories': tags.categories,
         'agents': tags.agents,
         'matched': matched,
+        'sources': sources or [],
     }
 
 
@@ -135,7 +173,9 @@ def select_facts(
 
         if len(order) >= limit:
             continue
-        selected[edge.uuid] = format_recalled_fact(edge, status, tags, [source])
+        selected[edge.uuid] = format_recalled_fact(
+            edge, status, tags, [source], sources_for_edge(edge, episode_tags)
+        )
         order.append(edge.uuid)
 
     return [selected[uuid] for uuid in order]

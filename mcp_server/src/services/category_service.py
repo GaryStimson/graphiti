@@ -26,15 +26,15 @@ def normalize_category(name: str) -> str:
 
 
 def encode_source_description(
-    categories: list[str], agent: str | None = None, note: str | None = None
+    categories: list[str], agent: str | None = None, extra: dict[str, str] | None = None
 ) -> str:
-    """Build a source_description carrying the agent and category tags."""
+    """Build a source_description carrying the agent, category and any extra tags."""
     parts = []
     if agent:
         parts.append(f'agent={agent.replace(";", ",").strip()}')
     parts.append(f'categories={",".join(categories)}')
-    if note:
-        parts.append(note.replace(';', ',').strip())
+    for key, value in (extra or {}).items():
+        parts.append(f'{key}={value.replace(";", ",").strip()}')
     return '; '.join(parts)
 
 
