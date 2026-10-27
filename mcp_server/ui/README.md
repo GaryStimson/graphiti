@@ -17,7 +17,7 @@ the memory server's own `remember` tool.
 
 It is part of `docker/docker-compose-home.yml`.
 
-1. Set a password in `mcp_server/.env` (at least 8 characters, longer is better):
+1. Set a password in `mcp_server/.env` (at least 12 characters; use a long random one if it is reachable from the internet):
 
    ```
    UI_PASSWORD=...
@@ -31,7 +31,7 @@ It is part of `docker/docker-compose-home.yml`.
 
 3. Open <http://127.0.0.1:8200> on the machine that runs it and sign in.
 
-If `UI_PASSWORD` is missing or shorter than 8 characters the login is refused (the app fails closed).
+If `UI_PASSWORD` is missing or shorter than 12 characters the login is refused (the app fails closed).
 
 Settings (all optional, in `.env`): `UI_HOST_PORT` (default 8200), `UI_ALLOWED_HOSTS`
 (comma-separated Host names the UI accepts, default `localhost,127.0.0.1`), `UI_SESSION_DAYS`.
@@ -81,6 +81,32 @@ passwords, card numbers or one-time codes.
 
 **Do not put this on the public internet with only the password** (no Funnel, no public tunnel):
 it can delete everything. For remote use, keep it on your tailnet or behind Cloudflare Access.
+
+## Sharing a Cloudflare hostname with the MCP server
+
+The UI can live on the same hostname as the MCP endpoint (for example `memory.example.com`).
+In the tunnel's `config.yml`, put the secret MCP path first and the UI as the fallback:
+
+```yaml
+ingress:
+  - hostname: memory.example.com
+    path: ^/<MCP_SECRET_PATH>/
+    service: http://127.0.0.1:8100      # MCP server (MCP_HOST_PORT)
+  - hostname: memory.example.com
+    service: http://127.0.0.1:8200      # Memory Manager UI
+```
+
+and in `.env`:
+
+```
+UI_ALLOWED_HOSTS=localhost,127.0.0.1,memory.example.com
+UI_TRUSTED_IP_HEADER=cf-connecting-ip   # lockout per real visitor, not per tunnel
+```
+
+Check the rules with `cloudflared tunnel ingress rule https://memory.example.com/` and restart the
+tunnel service. Because this puts a delete-capable UI on the internet behind only a password:
+use a long random `UI_PASSWORD` (12+ characters is enforced), add a Cloudflare rate-limiting rule
+for `POST /auth/login`, and consider Cloudflare Access for real multi-factor protection.
 
 ## Installing as an app
 

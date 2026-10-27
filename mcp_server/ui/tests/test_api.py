@@ -104,6 +104,23 @@ class TestAuthFlow:
         c = TestClient(app, base_url='http://testserver')
         assert c.post('/auth/login', json={'password': ''}, headers=CSRF).status_code == 503
 
+    def test_lockout_is_per_visitor_when_behind_a_trusted_proxy(self, settings, snap):
+        proxied = settings.__class__(**{**settings.__dict__, 'trusted_ip_header': 'cf-connecting-ip'})
+        app = create_app(proxied, store=FakeStore(snap))  # type: ignore[arg-type]
+        c = TestClient(app, base_url='http://testserver')
+        attacker = {**CSRF, 'cf-connecting-ip': '203.0.113.9'}
+        for _ in range(5):
+            assert c.post('/auth/login', json={'password': 'bad'}, headers=attacker).status_code == 401
+        assert c.post('/auth/login', json={'password': PASSWORD}, headers=attacker).status_code == 429
+        owner = {**CSRF, 'cf-connecting-ip': '198.51.100.7'}
+        assert c.post('/auth/login', json={'password': PASSWORD}, headers=owner).status_code == 200
+
+    def test_short_password_is_refused(self, settings, snap):
+        weak = settings.__class__(**{**settings.__dict__, 'ui_password': 'only11chars'})
+        app = create_app(weak, store=FakeStore(snap))  # type: ignore[arg-type]
+        c = TestClient(app, base_url='http://testserver')
+        assert c.post('/auth/login', json={'password': 'only11chars'}, headers=CSRF).status_code == 503
+
     def test_unknown_host_rejected(self, client):
         assert client.get('/auth/me', headers={'Host': 'evil.example.com'}).status_code == 421
         assert client.get('/healthz', headers={'Host': 'evil.example.com'}).status_code == 200

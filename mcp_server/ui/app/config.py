@@ -25,12 +25,14 @@ class Settings:
     mcp_host_header: str
     allowed_hosts: list[str] = field(default_factory=list)
     session_days: int = 14
+    trusted_ip_header: str = ''
+    min_password_length: int = 12
     max_login_failures: int = 5
     lockout_seconds: int = 900
 
     @property
     def password_configured(self) -> bool:
-        return len(self.ui_password) >= 8
+        return len(self.ui_password) >= self.min_password_length
 
     @property
     def mcp_endpoint(self) -> str:
@@ -52,4 +54,7 @@ def load_settings() -> Settings:
         mcp_host_header=os.getenv('MCP_HOST_HEADER', 'localhost:8000'),
         allowed_hosts=_split(os.getenv('UI_ALLOWED_HOSTS'), ['localhost', '127.0.0.1']),
         session_days=int(os.getenv('UI_SESSION_DAYS', '14')),
+        # Set to e.g. cf-connecting-ip when served through a Cloudflare Tunnel, so login
+        # throttling counts the real visitor and not the tunnel for every request.
+        trusted_ip_header=os.getenv('UI_TRUSTED_IP_HEADER', '').strip().lower(),
     )

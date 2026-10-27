@@ -112,6 +112,14 @@ def create_app(
 
     # ---------------------------------------------------------------- auth
 
+    def client_id(request: Request) -> str:
+        """Who is logging in: the proxy-supplied visitor IP when configured, else the peer."""
+        if settings.trusted_ip_header:
+            value = request.headers.get(settings.trusted_ip_header, '').split(',')[0].strip()
+            if value:
+                return value[:64]
+        return request.client.host if request.client else 'unknown'
+
     @app.get('/auth/me')
     def me(request: Request) -> dict[str, Any]:
         return {
@@ -122,8 +130,10 @@ def create_app(
     @app.post('/auth/login')
     def login(body: LoginBody, request: Request, response: Response) -> dict[str, Any]:
         if not settings.password_configured:
-            raise HTTPException(503, 'UI_PASSWORD is not set (needs at least 8 characters)')
-        client = request.client.host if request.client else 'unknown'
+            raise HTTPException(
+                503, f'UI_PASSWORD is not set (needs at least {settings.min_password_length} characters)'
+            )
+        client = client_id(request)
         wait = auth.throttle.retry_after(client)
         if wait:
             raise HTTPException(429, f'Too many attempts. Try again in {wait} seconds.')
