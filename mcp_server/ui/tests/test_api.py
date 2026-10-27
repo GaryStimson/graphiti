@@ -83,7 +83,7 @@ class TestAuthFlow:
     def test_login_cookie_flags_and_session(self, client):
         response = login(client)
         cookie = response.headers['set-cookie'].lower()
-        assert 'httponly' in cookie and 'samesite=strict' in cookie
+        assert 'httponly' in cookie and 'samesite=lax' in cookie
         assert client.get('/api/stats').status_code == 200
         assert client.get('/auth/me').json()['authenticated'] is True
         client.post('/auth/logout', headers=CSRF)

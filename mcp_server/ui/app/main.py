@@ -172,7 +172,7 @@ def create_app(
             auth.issue_session(),
             max_age=auth.max_age,
             httponly=True,
-            samesite='strict',
+            samesite='lax',  # strict would be withheld when an installed app is launched from outside
             secure=secure,
             path=base or '/',
         )

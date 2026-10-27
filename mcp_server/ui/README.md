@@ -69,10 +69,10 @@ passwords, card numbers or one-time codes.
 
 ## Security model
 
-- Single owner, password from `UI_PASSWORD`. Sessions are signed cookies (HttpOnly, SameSite=Strict,
+- Single owner, password from `UI_PASSWORD`. Sessions are signed cookies (HttpOnly, SameSite=Lax,
   `Secure` when served over HTTPS). The signing key is generated once and kept in the data volume.
 - Failed logins are throttled (5 per client, then a 15 minute lockout).
-- State-changing calls need a custom header and a same-origin `Origin`, on top of SameSite=Strict.
+- State-changing calls need a custom header and a same-origin `Origin`, on top of SameSite=Lax (Lax rather than Strict so an installed app launched from outside the site still arrives signed in).
 - A Host allow-list (`UI_ALLOWED_HOSTS`) guards against DNS rebinding; unknown hosts get 421.
 - Strict Content-Security-Policy (no inline script or style), `no-store` on API responses, nothing
   secret is ever sent to the browser. Memory text is untrusted and always rendered as plain text.

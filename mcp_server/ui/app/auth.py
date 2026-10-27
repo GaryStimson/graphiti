@@ -6,7 +6,7 @@
 - Failed logins are throttled per client IP and globally (lockout), so the password cannot
   be guessed online.
 - State-changing requests must carry a custom header (and a same-origin Origin), which a
-  cross-site form or fetch cannot send: CSRF protection on top of SameSite=Strict.
+  cross-site form or fetch cannot send: CSRF protection on top of SameSite=Lax.
 """
 
 from __future__ import annotations
