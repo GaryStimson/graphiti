@@ -87,6 +87,13 @@ Your memory URL is:
 https://<machine>.<tailnet>.ts.net:10000/<MCP_SECRET_PATH>/mcp
 ```
 
+### Optional: Memory Manager UI
+
+`docker-compose-home.yml` also starts `memory-ui`, a password-protected web app for browsing,
+reviewing and fixing memories and exploring the graph (installable as an app). Set `UI_PASSWORD`
+in `.env`, then open <http://127.0.0.1:8200>. It is local-only by default; see
+[`../ui/README.md`](../ui/README.md) for features, security notes and installing it on other devices.
+
 ### Optional: Cloudflare Tunnel on standard port 443
 
 Some clients (e.g. Anthropic's custom connectors) could not reach Funnel on 8443/10000.

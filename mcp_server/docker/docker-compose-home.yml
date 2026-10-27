@@ -38,7 +38,40 @@ services:
       retries: 5
       start_period: 30s
 
+  # Memory Manager UI: browse, review and manage memories (see ui/README.md).
+  # Local only (127.0.0.1) and password protected. It reads the graph directly over the
+  # compose network and adds memories through the MCP server; it never holds the OpenAI key.
+  memory-ui:
+    image: personal-memory-ui:local
+    build:
+      context: ../ui
+    restart: unless-stopped
+    depends_on:
+      personal-memory:
+        condition: service_healthy
+    environment:
+      - UI_PASSWORD=${UI_PASSWORD:-}
+      - UI_ALLOWED_HOSTS=${UI_ALLOWED_HOSTS:-localhost,127.0.0.1}
+      - MCP_SECRET_PATH=${MCP_SECRET_PATH:-}
+      - FALKORDB_PASSWORD=${FALKORDB_PASSWORD:-}
+      - GRAPHITI_GROUP_ID=${GRAPHITI_GROUP_ID:-personal}
+      - FALKORDB_HOST=personal-memory
+      - MCP_URL=http://personal-memory:8000
+    volumes:
+      - memory_ui_data:/data
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    ports:
+      - "127.0.0.1:${UI_HOST_PORT:-8200}:8200"
+
 volumes:
+  memory_ui_data:
+    name: memory_ui_data
   personal_memory_data:
     name: personal_memory_data
   personal_memory_logs:

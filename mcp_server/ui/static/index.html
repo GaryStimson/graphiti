@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Memory Manager</title>
+  <meta name="description" content="Browse, review and manage the personal memory shared by your AI agents.">
+  <meta name="theme-color" content="#0f172a">
+  <meta name="color-scheme" content="dark light">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="Memory">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="robots" content="noindex, nofollow">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="icon" type="image/png" href="/icons/favicon-64.png">
+  <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
+  <link rel="stylesheet" href="/assets/style.css">
+</head>
+<body>
+  <div id="app">
+    <header id="topbar" hidden>
+      <a class="brand" href="#/" aria-label="Memory Manager home">
+        <img src="/icons/favicon-64.png" alt="" width="28" height="28">
+        <span>Memory</span>
+      </a>
+      <nav id="nav" aria-label="Sections">
+        <a href="#/" data-route="">Overview</a>
+        <a href="#/notes" data-route="notes">Notes</a>
+        <a href="#/facts" data-route="facts">Facts</a>
+        <a href="#/graph" data-route="graph">Graph</a>
+        <a href="#/review" data-route="review">Review <span id="review-badge" class="count" hidden></span></a>
+        <a href="#/add" data-route="add">Add</a>
+        <a href="#/history" data-route="history">History</a>
+      </nav>
+      <div class="top-actions">
+        <button id="install" class="btn ghost" hidden>Install app</button>
+        <button id="logout" class="btn ghost">Sign out</button>
+      </div>
+    </header>
+    <main id="main" tabindex="-1">
+      <p class="muted pad">Loading…</p>
+    </main>
+  </div>
+  <div id="toasts" aria-live="polite"></div>
+  <noscript><p class="pad">This app needs JavaScript.</p></noscript>
+  <script src="/assets/vendor/cytoscape.min.js"></script>
+  <script src="/assets/app.js"></script>
+</body>
+</html>
