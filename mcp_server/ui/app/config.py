@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -26,6 +27,7 @@ class Settings:
     allowed_hosts: list[str] = field(default_factory=list)
     session_days: int = 14
     trusted_ip_header: str = ''
+    ui_secret_path: str = ''
     min_password_length: int = 12
     max_login_failures: int = 5
     lockout_seconds: int = 900
@@ -35,8 +37,22 @@ class Settings:
         return len(self.ui_password) >= self.min_password_length
 
     @property
+    def base_path(self) -> str:
+        """URL prefix the whole UI is served under ('' when no secret path is set)."""
+        return f'/{self.ui_secret_path}' if self.ui_secret_path else ''
+
+    @property
     def mcp_endpoint(self) -> str:
         return f'{self.mcp_url.rstrip("/")}/{self.mcp_secret_path}/mcp'
+
+
+def _secret_path(value: str | None) -> str:
+    secret = (value or '').strip().strip('/')
+    if secret and (len(secret) < 32 or not re.fullmatch(r'[A-Za-z0-9_-]+', secret)):
+        raise ValueError(
+            'UI_SECRET_PATH must be at least 32 characters from A-Z, a-z, 0-9, _ and -'
+        )
+    return secret
 
 
 def load_settings() -> Settings:
@@ -57,4 +73,5 @@ def load_settings() -> Settings:
         # Set to e.g. cf-connecting-ip when served through a Cloudflare Tunnel, so login
         # throttling counts the real visitor and not the tunnel for every request.
         trusted_ip_header=os.getenv('UI_TRUSTED_IP_HEADER', '').strip().lower(),
+        ui_secret_path=_secret_path(os.getenv('UI_SECRET_PATH')),
     )

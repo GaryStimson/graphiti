@@ -84,8 +84,18 @@ it can delete everything. For remote use, keep it on your tailnet or behind Clou
 
 ## Sharing a Cloudflare hostname with the MCP server
 
-The UI can live on the same hostname as the MCP endpoint (for example `memory.example.com`).
-In the tunnel's `config.yml`, put the secret MCP path first and the UI as the fallback:
+The UI can live on the same hostname as the MCP endpoint (for example `memory.example.com`), each
+under its own secret path. Set a second secret in `.env`; the UI is then served **only** under
+`/<UI_SECRET_PATH>/` and every other path returns 404:
+
+```
+UI_SECRET_PATH=...                       # 32+ chars from A-Z a-z 0-9 _ - (python3 -c 'import secrets; print(secrets.token_urlsafe(32))')
+UI_ALLOWED_HOSTS=localhost,127.0.0.1,memory.example.com
+UI_TRUSTED_IP_HEADER=cf-connecting-ip    # lockout per real visitor, not per tunnel
+```
+
+In the tunnel's `config.yml` route each secret path to its service; the bare hostname then falls
+through to the catch-all 404:
 
 ```yaml
 ingress:
@@ -93,20 +103,17 @@ ingress:
     path: ^/<MCP_SECRET_PATH>/
     service: http://127.0.0.1:8100      # MCP server (MCP_HOST_PORT)
   - hostname: memory.example.com
+    path: ^/<UI_SECRET_PATH>/
     service: http://127.0.0.1:8200      # Memory Manager UI
+  - service: http_status:404
 ```
 
-and in `.env`:
-
-```
-UI_ALLOWED_HOSTS=localhost,127.0.0.1,memory.example.com
-UI_TRUSTED_IP_HEADER=cf-connecting-ip   # lockout per real visitor, not per tunnel
-```
-
-Check the rules with `cloudflared tunnel ingress rule https://memory.example.com/` and restart the
-tunnel service. Because this puts a delete-capable UI on the internet behind only a password:
-use a long random `UI_PASSWORD` (12+ characters is enforced), add a Cloudflare rate-limiting rule
-for `POST /auth/login`, and consider Cloudflare Access for real multi-factor protection.
+Check the rules with `cloudflared tunnel ingress rule https://memory.example.com/<UI_SECRET_PATH>/`,
+restart the tunnel service, then open `https://memory.example.com/<UI_SECRET_PATH>/` (this is also
+the installed app's start URL). The secret path is a first factor and the password a second; the
+app also works at the root when `UI_SECRET_PATH` is empty. Because this puts a delete-capable UI on
+the internet, use a long random `UI_PASSWORD` (12+ characters is enforced), add a Cloudflare
+rate-limiting rule for `POST .../auth/login`, and consider Cloudflare Access for real MFA.
 
 ## Installing as an app
 

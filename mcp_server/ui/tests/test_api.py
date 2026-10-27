@@ -213,3 +213,71 @@ class TestApi:
     def test_static_shell_is_public(self, client):
         assert client.get('/sw.js').status_code in (200, 404)  # 404 until static files exist
         assert client.get('/healthz').json()['status'] == 'ok'
+
+
+SECRET = 'u' * 40
+
+
+@pytest.fixture
+def secret_client(settings, snap):
+    prefixed = settings.__class__(**{**settings.__dict__, 'ui_secret_path': SECRET})
+    app = create_app(prefixed, store=FakeStore(snap))  # type: ignore[arg-type]
+    return TestClient(app, base_url='http://testserver')
+
+
+class TestSecretPath:
+    def test_nothing_exists_outside_the_secret_path(self, secret_client):
+        c = secret_client
+        for path in ('/', '/api/stats', '/auth/me', '/sw.js', '/assets/app.js', '/manifest.webmanifest', f'/{SECRET}x/'):
+            assert c.get(path).status_code == 404, path
+        assert c.post('/auth/login', json={'password': PASSWORD}, headers=CSRF).status_code == 404
+        assert c.get('/healthz').status_code == 200  # container health check only
+
+    def test_whole_app_works_under_the_prefix(self, secret_client):
+        c = secret_client
+        base = f'/{SECRET}'
+        index = c.get(f'{base}/')
+        assert index.status_code == 200 and 'Memory Manager' in index.text
+        assert c.get(f'{base}/assets/app.js').status_code == 200
+        assert c.get(f'{base}/icons/icon-192.png').status_code == 200
+        assert c.get(f'{base}/manifest.webmanifest').status_code == 200
+        assert c.get(f'{base}/sw.js').headers['service-worker-allowed'] == f'{base}/'
+        assert c.get(f'{base}/api/stats').status_code == 401  # still needs the password
+        assert c.get(f'{base}/auth/me').json()['configured'] is True
+
+    def test_login_cookie_is_scoped_to_the_prefix(self, secret_client):
+        c = secret_client
+        base = f'/{SECRET}'
+        response = c.post(f'{base}/auth/login', json={'password': PASSWORD}, headers=CSRF)
+        assert response.status_code == 200
+        assert f'Path={base}' in response.headers['set-cookie']
+        assert c.get(f'{base}/api/stats').status_code == 200
+        assert c.post(f'{base}/api/notes/n3', headers=CSRF).status_code in (404, 405)
+        assert c.delete(f'{base}/api/notes/n3').status_code == 403  # CSRF header still required
+
+    def test_missing_trailing_slash_redirects_inside_the_prefix(self, secret_client):
+        response = secret_client.get(f'/{SECRET}', follow_redirects=False)
+        assert response.status_code in (307, 308)
+        assert response.headers['location'].endswith(f'/{SECRET}/')
+
+    def test_bad_secret_path_is_rejected_at_startup(self, monkeypatch):
+        from app.config import load_settings
+
+        monkeypatch.setenv('UI_SECRET_PATH', 'too-short')
+        with pytest.raises(ValueError):
+            load_settings()
+        monkeypatch.setenv('UI_SECRET_PATH', 'a' * 40)
+        assert load_settings().base_path == '/' + 'a' * 40
+
+
+class TestCookies:
+    def test_a_stale_duplicate_session_cookie_does_not_shadow_a_valid_one(self, client):
+        login(client)
+        good = client.cookies.get('mm_session')
+        assert good
+        client.cookies.clear()
+        stale = 'not-a-valid-token'
+        headers = {'cookie': f'mm_session={stale}; mm_session={good}'}
+        assert client.get('/api/stats', headers=headers).status_code == 200
+        assert client.get('/auth/me', headers=headers).json()['authenticated'] is True
+        assert client.get('/api/stats', headers={'cookie': f'mm_session={stale}'}).status_code == 401

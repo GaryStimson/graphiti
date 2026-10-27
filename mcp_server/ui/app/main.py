@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi import APIRouter, FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -84,6 +84,17 @@ def create_app(
     )
 
     app = FastAPI(title='Memory Manager', docs_url=None, redoc_url=None, openapi_url=None)
+    router = APIRouter()
+    base = settings.base_path  # '' or '/<UI_SECRET_PATH>'
+
+    def signed_in(request: Request) -> bool:
+        """True if ANY mm_session cookie sent is valid (stale duplicates from an earlier path
+        or deployment must not shadow the good one)."""
+        for part in request.headers.get('cookie', '').split(';'):
+            name, _, value = part.strip().partition('=')
+            if name == COOKIE_NAME and auth.session_valid(value):
+                return True
+        return False
 
     # ---------------------------------------------------------------- middleware
 
@@ -93,14 +104,24 @@ def create_app(
         if host not in settings.allowed_hosts and request.url.path != '/healthz':
             return JSONResponse({'detail': 'Host not allowed'}, status_code=421)
 
-        path = request.url.path
+        full_path = request.url.path
+        if full_path == '/healthz':
+            path = full_path
+        elif base and (full_path == base or full_path.startswith(base + '/')):
+            path = full_path[len(base):] or '/'
+        elif base:
+            # Not under the secret path: pretend nothing is here.
+            return JSONResponse({'detail': 'Not found'}, status_code=404)
+        else:
+            path = full_path
+
         protected = path.startswith('/api/') or path in ('/auth/logout',)
         if request.method not in ('GET', 'HEAD', 'OPTIONS') and (
             path.startswith('/api/') or path.startswith('/auth/')
         ):
             if not csrf_ok(request.method, dict(request.headers), request.headers.get('host', '')):
                 return JSONResponse({'detail': 'Cross-site request blocked'}, status_code=403)
-        if protected and not auth.session_valid(request.cookies.get(COOKIE_NAME)):
+        if protected and not signed_in(request):
             return JSONResponse({'detail': 'Not signed in'}, status_code=401)
 
         response: Response = await call_next(request)
@@ -120,14 +141,14 @@ def create_app(
                 return value[:64]
         return request.client.host if request.client else 'unknown'
 
-    @app.get('/auth/me')
+    @router.get('/auth/me')
     def me(request: Request) -> dict[str, Any]:
         return {
-            'authenticated': auth.session_valid(request.cookies.get(COOKIE_NAME)),
+            'authenticated': signed_in(request),
             'configured': settings.password_configured,
         }
 
-    @app.post('/auth/login')
+    @router.post('/auth/login')
     def login(body: LoginBody, request: Request, response: Response) -> dict[str, Any]:
         if not settings.password_configured:
             raise HTTPException(
@@ -153,13 +174,15 @@ def create_app(
             httponly=True,
             samesite='strict',
             secure=secure,
-            path='/',
+            path=base or '/',
         )
+        if base:
+            response.delete_cookie(COOKIE_NAME, path='/')  # clear one from before the secret path
         return {'ok': True}
 
-    @app.post('/auth/logout')
+    @router.post('/auth/logout')
     def logout(response: Response) -> dict[str, Any]:
-        response.delete_cookie(COOKIE_NAME, path='/')
+        response.delete_cookie(COOKIE_NAME, path=base or '/')
         return {'ok': True}
 
     @app.get('/healthz')
@@ -168,7 +191,7 @@ def create_app(
 
     # ---------------------------------------------------------------- read API
 
-    @app.get('/api/stats')
+    @router.get('/api/stats')
     def api_stats() -> dict[str, Any]:
         snap = graph.snapshot()
         data = domain.stats(snap)
@@ -178,20 +201,20 @@ def create_app(
         }
         return data
 
-    @app.get('/api/notes')
+    @router.get('/api/notes')
     def api_notes(
         query: str = '', category: str = '', agent: str = '', days: int = 0, page: int = 1
     ) -> dict[str, Any]:
         return domain.list_notes(graph.snapshot(), query, category, agent, days, page)
 
-    @app.get('/api/notes/{note_id}')
+    @router.get('/api/notes/{note_id}')
     def api_note(note_id: str) -> dict[str, Any]:
         data = domain.note_detail(graph.snapshot(), note_id)
         if data is None:
             raise HTTPException(404, 'Note not found')
         return data
 
-    @app.get('/api/notes/{note_id}/delete-plan')
+    @router.get('/api/notes/{note_id}/delete-plan')
     def api_note_plan(note_id: str) -> dict[str, Any]:
         snap = graph.snapshot(fresh=True)
         note = snap.notes.get(note_id)
@@ -199,7 +222,7 @@ def create_app(
             raise HTTPException(404, 'Note not found')
         return ops.public_plan(ops.plan_note_delete(snap, note))
 
-    @app.get('/api/facts')
+    @router.get('/api/facts')
     def api_facts(
         status: str = '',
         query: str = '',
@@ -210,7 +233,7 @@ def create_app(
     ) -> dict[str, Any]:
         return domain.list_facts(graph.snapshot(), status, query, category, agent, entity, page)
 
-    @app.get('/api/facts/{fact_uuid}')
+    @router.get('/api/facts/{fact_uuid}')
     def api_fact(fact_uuid: str) -> dict[str, Any]:
         snap = graph.snapshot()
         fact = snap.facts_by_uuid.get(fact_uuid)
@@ -218,7 +241,7 @@ def create_app(
             raise HTTPException(404, 'Fact not found')
         return domain.fact_dict(snap, fact)
 
-    @app.get('/api/facts/{fact_uuid}/delete-plan')
+    @router.get('/api/facts/{fact_uuid}/delete-plan')
     def api_fact_plan(fact_uuid: str) -> dict[str, Any]:
         snap = graph.snapshot(fresh=True)
         fact = snap.facts_by_uuid.get(fact_uuid)
@@ -226,18 +249,18 @@ def create_app(
             raise HTTPException(404, 'Fact not found')
         return ops.public_plan(ops.plan_fact_delete(snap, fact))
 
-    @app.get('/api/entities')
+    @router.get('/api/entities')
     def api_entities(query: str = '', page: int = 1) -> dict[str, Any]:
         return domain.list_entities(graph.snapshot(), query, page)
 
-    @app.get('/api/entities/{entity_uuid}')
+    @router.get('/api/entities/{entity_uuid}')
     def api_entity(entity_uuid: str) -> dict[str, Any]:
         data = domain.entity_detail(graph.snapshot(), entity_uuid)
         if data is None:
             raise HTTPException(404, 'Entity not found')
         return data
 
-    @app.get('/api/graph')
+    @router.get('/api/graph')
     def api_graph(
         center: str = '',
         hops: int = 1,
@@ -257,15 +280,15 @@ def create_app(
             limit=max(10, min(limit, 300)),
         )
 
-    @app.get('/api/review')
+    @router.get('/api/review')
     def api_review(days: int = 7) -> dict[str, Any]:
         return domain.review(graph.snapshot(), max(1, min(days, 365)))
 
-    @app.get('/api/changes')
+    @router.get('/api/changes')
     def api_changes() -> dict[str, Any]:
         return {'items': audit.entries()}
 
-    @app.get('/api/export')
+    @router.get('/api/export')
     def api_export() -> Response:
         data = domain.export(graph.snapshot(fresh=True))
         stamp = datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')
@@ -275,7 +298,7 @@ def create_app(
 
     # ---------------------------------------------------------------- write API
 
-    @app.delete('/api/notes/{note_id}')
+    @router.delete('/api/notes/{note_id}')
     def api_delete_note(note_id: str) -> dict[str, Any]:
         snap = graph.snapshot(fresh=True)
         note = snap.notes.get(note_id)
@@ -283,7 +306,7 @@ def create_app(
             raise HTTPException(404, 'Note not found')
         return ops.delete_note(graph, audit, snap, note)
 
-    @app.delete('/api/facts/{fact_uuid}')
+    @router.delete('/api/facts/{fact_uuid}')
     def api_delete_fact(fact_uuid: str) -> dict[str, Any]:
         snap = graph.snapshot(fresh=True)
         fact = snap.facts_by_uuid.get(fact_uuid)
@@ -291,7 +314,7 @@ def create_app(
             raise HTTPException(404, 'Fact not found')
         return ops.delete_fact(graph, audit, snap, fact)
 
-    @app.patch('/api/facts/{fact_uuid}')
+    @router.patch('/api/facts/{fact_uuid}')
     def api_edit_fact(fact_uuid: str, body: FactEdit) -> dict[str, Any]:
         snap = graph.snapshot(fresh=True)
         fact = snap.facts_by_uuid.get(fact_uuid)
@@ -316,7 +339,7 @@ def create_app(
                 'Memory should not hold passwords, card numbers or one-time codes.',
             )
 
-    @app.post('/api/remember')
+    @router.post('/api/remember')
     async def api_remember(body: RememberBody) -> dict[str, Any]:
         _check_sensitive(body.content, body.allow_sensitive)
         try:
@@ -329,7 +352,7 @@ def create_app(
         graph.invalidate()
         return result
 
-    @app.post('/api/facts/{fact_uuid}/rewrite')
+    @router.post('/api/facts/{fact_uuid}/rewrite')
     async def api_rewrite_fact(fact_uuid: str, body: RewriteBody) -> dict[str, Any]:
         """Edit a fact's wording: delete it, then re-add the corrected sentence."""
         _check_sensitive(body.new_text, body.allow_sensitive)
@@ -375,25 +398,26 @@ def create_app(
             raise HTTPException(404)
         return FileResponse(path, media_type=media_type, headers=headers or None)
 
-    @app.get('/')
+    @router.get('/')
     def index() -> FileResponse:
         return static_file('index.html', 'text/html', **{'Cache-Control': 'no-cache'})
 
-    @app.get('/sw.js')
+    @router.get('/sw.js')
     def service_worker() -> FileResponse:
         return static_file(
             'sw.js',
             'text/javascript',
-            **{'Cache-Control': 'no-cache', 'Service-Worker-Allowed': '/'},
+            **{'Cache-Control': 'no-cache', 'Service-Worker-Allowed': f'{base}/'},
         )
 
-    @app.get('/manifest.webmanifest')
+    @router.get('/manifest.webmanifest')
     def manifest() -> FileResponse:
         return static_file('manifest.webmanifest', 'application/manifest+json')
 
+    app.include_router(router, prefix=base)
     if STATIC_DIR.is_dir():
-        app.mount('/assets', StaticFiles(directory=STATIC_DIR / 'assets'), name='assets')
-        app.mount('/icons', StaticFiles(directory=STATIC_DIR / 'icons'), name='icons')
+        app.mount(f'{base}/assets', StaticFiles(directory=STATIC_DIR / 'assets'), name='assets')
+        app.mount(f'{base}/icons', StaticFiles(directory=STATIC_DIR / 'icons'), name='icons')
 
     return app
 

@@ -37,7 +37,7 @@ class ApiError extends Error {
 async function api(path, { method = 'GET', body } = {}) {
   let res;
   try {
-    res = await fetch(path, {
+    res = await fetch(path.replace(/^\//, ''), {
       method,
       credentials: 'same-origin',
       headers: { 'X-Requested-With': 'memory-ui', ...(body ? { 'Content-Type': 'application/json' } : {}) },
@@ -199,7 +199,7 @@ function showLogin(message) {
   }, error, h('div', { class: 'field' }, h('label', { for: 'password' }, 'Password'), input), button);
   main.classList.remove('wide');
   main.replaceChildren(h('div', { class: 'login' },
-    h('img', { src: '/icons/icon-192.png', width: 84, height: 84, alt: '' }),
+    h('img', { src: 'icons/icon-192.png', width: 84, height: 84, alt: '' }),
     h('h1', {}, 'Memory Manager'),
     h('p', { class: 'muted' }, 'Sign in to view and manage your memories.'),
     form));
@@ -429,7 +429,7 @@ async function viewOverview() {
       : h('p', { class: 'muted' }, 'Nothing new this week.'),
     h('h2', {}, 'Data'),
     h('div', { class: 'row' },
-      h('a', { class: 'btn', href: '/api/export', download: '' }, 'Export everything (JSON)'),
+      h('a', { class: 'btn', href: 'api/export', download: '' }, 'Export everything (JSON)'),
       h('span', { class: 'muted small' }, 'Deleted items are also saved to a recovery folder on the server.')),
     h('p', { class: 'muted small' }, `Updated ${fmt(stats.generated_at)}`));
 }
@@ -694,7 +694,7 @@ document.getElementById('install').addEventListener('click', async () => {
 window.addEventListener('appinstalled', () => { document.getElementById('install').hidden = true; toast('App installed'); });
 
 if ('serviceWorker' in navigator) {
-  window.addEventListener('load', () => navigator.serviceWorker.register('/sw.js').catch(() => {}));
+  window.addEventListener('load', () => navigator.serviceWorker.register('sw.js').catch(() => {}));
 }
 
 window.addEventListener('hashchange', route);
